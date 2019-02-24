@@ -2,9 +2,11 @@
 
 import collections
 import itertools
+import multiprocessing
 import sys
 import textwrap
 import threading
+import time
 
 import puz
 
@@ -120,6 +122,15 @@ class Grid:
                 if md == 16:
                     cell.corrected = True
 
+        saved_timer = self.puzfile.extensions.get(puz.Extensions.Timer, None)
+        if saved_timer: 
+            saved_time, running = saved_timer.decode().split(',')
+        else:
+            saved_time, running = 0, True
+
+        self.saved_time = int(saved_time)
+        self.timer_running = bool(running)
+
         return None
 
     def draw(self):
@@ -223,6 +234,8 @@ class Grid:
                 md.append(cell_md)
 
             self.puzfile.markup().markup = md
+
+        self.puzfile.extensions[puz.Extensions.Timer] = self.timer.save_format()
 
         self.puzfile.save(filename)
 
@@ -357,6 +370,7 @@ class Grid:
     def send_notification(self, message, timeout=5):
         self.notification_timer = threading.Timer(timeout, self.clear_notification_area)
         self.notification_timer.daemon = True
+
         print(self.term.move(*self.notification_area)
                 + self.term.reverse(message) + self.term.clear_eol)
         self.notification_timer.start()
@@ -552,6 +566,56 @@ class Cursor:
             self.grid.send_notification("No valid number entered.")
 
 
+class Timer(multiprocessing.Process):
+    def __init__(self, grid, starting_seconds=0, running=True):
+        self.starting_seconds = starting_seconds
+        self.start_time = None
+        self.running = running
+        self.time_passed = 0
+        multiprocessing.Process.__init__(self, daemon=True)
+
+        self.grid = grid
+
+    def run(self):
+        self.start_time = time.time()
+        y_coord = self.grid.grid_y + self.grid.row_count * 2 + 5
+        x_coord = self.grid.grid_x + self.grid.column_count * 4 - 7
+
+        while self.running:
+            self.time_passed = self.starting_seconds + int(time.time() - self.start_time)
+                 
+            print(self.grid.term.move(y_coord, x_coord)
+                    + self.display_format())
+            time.sleep(0.2)
+
+    def pause(self):
+        self.running = False
+
+    def unpause(self):
+        self.starting_seconds = self.time_passed
+        self.start_time = time.time()
+        self.running = True
+
+    def display_format(self):
+        time_amount = self.time_passed
+
+        m, s = divmod(time_amount, 60)
+        h, m = divmod(m, 60)
+
+        ch = '{h:02d}:' if h else '   '
+        compiled = '{ch}{m:02d}:{s:02d}'.format(
+                ch=ch, m=m, s=s)
+
+        return(compiled)
+
+    def save_format(self):
+        time_amount = self.time_passed
+        save_string = '{seconds},{running}'.format(
+                seconds=time_amount, running=int(self.running))
+        return save_string.encode(puz.ENCODING)
+
+
+
 def main():
     filename = sys.argv[1]
     try:
@@ -633,9 +697,18 @@ def main():
     modified_since_save = False
     to_quit = False
 
+    timer_mgr = multiprocessing.Manager()
+    timer_vals = timer_mgr.Namespace
+
+    timer_vals.saved_time, timer_vals.running = grid.saved_time, grid.running
+    
+    timer = Timer(timer_vals)
+    timer.start()
+
     info_location = {'x':grid_x, 'y':grid_y + 2 * grid.row_count + 2}
 
     with term.raw(), term.hidden_cursor():
+
         while not to_quit:
             # First up we draw all the necessary stuff. If the current word
             # is different from the word the last time through the loop:
